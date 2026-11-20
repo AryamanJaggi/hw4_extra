@@ -14,7 +14,7 @@ from apps.models import *
 import time
 device = ndl.cpu()
 
-def parse_mnist(image_filesname, label_filename):
+def parse_mnist(image_filename, label_filename):
     """Read an images and labels file in MNIST format.  See this page:
     http://yann.lecun.com/exdb/mnist/ for a description of the file format.
 
@@ -37,7 +37,13 @@ def parse_mnist(image_filesname, label_filename):
                 for MNIST will contain the values 0-9.
     """
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    with gzip.open(image_filename, "rb") as f:
+        _, n, rows, cols = struct.unpack(">IIII", f.read(16))
+        X = np.frombuffer(f.read(), dtype=np.uint8).reshape(n, rows * cols)
+    with gzip.open(label_filename, "rb") as f:
+        _, n = struct.unpack(">II", f.read(8))
+        y = np.frombuffer(f.read(), dtype=np.uint8)
+    return (X.astype(np.float32) / 255.0), y
     ### END YOUR SOLUTION
 
 
@@ -58,14 +64,17 @@ def softmax_loss(Z, y_one_hot):
         Average softmax loss over the sample. (ndl.Tensor[np.float32])
     """
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    batch_size = Z.shape[0]
+    lse = ndl.log(ndl.summation(ndl.exp(Z), axes=(1,)))
+    z_y = ndl.summation(Z * y_one_hot, axes=(1,))
+    return ndl.summation(lse - z_y) / batch_size
     ### END YOUR SOLUTION
 
 
 def nn_epoch(X, y, W1, W2, lr=0.1, batch=100):
     """Run a single epoch of SGD for a two-layer neural network defined by the
     weights W1 and W2 (with no bias terms):
-        logits = ReLU(X * W1) * W1
+        logits = ReLU(X * W1) * W2
     The function should use the step size lr, and the specified batch size (and
     again, without randomizing the order of X).
 
@@ -87,7 +96,17 @@ def nn_epoch(X, y, W1, W2, lr=0.1, batch=100):
     """
 
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    num_examples, num_classes = X.shape[0], W2.shape[1]
+    for start in range(0, num_examples, batch):
+        X_b = ndl.Tensor(X[start:start + batch])
+        y_b = y[start:start + batch]
+        Iy = np.zeros((y_b.shape[0], num_classes), dtype=np.float32)
+        Iy[np.arange(y_b.shape[0]), y_b] = 1
+        loss = softmax_loss(ndl.relu(X_b @ W1) @ W2, ndl.Tensor(Iy))
+        loss.backward()
+        W1 = ndl.Tensor(W1.realize_cached_data() - lr * W1.grad.realize_cached_data())
+        W2 = ndl.Tensor(W2.realize_cached_data() - lr * W2.grad.realize_cached_data())
+    return W1, W2
     ### END YOUR SOLUTION
 
 ### CIFAR-10 training ###
@@ -110,7 +129,25 @@ def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None)
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    training = opt is not None
+    model.train() if training else model.eval()
+    correct, total_loss, n = 0.0, 0.0, 0
+    for X, y in dataloader:
+        X = ndl.Tensor(X.realize_cached_data(), device=device, requires_grad=False) \
+            if X.device != device else X
+        y = ndl.Tensor(y.realize_cached_data(), device=device, requires_grad=False) \
+            if y.device != device else y
+        out = model(X)
+        loss = loss_fn(out, y)
+        if training:
+            opt.reset_grad()
+            loss.backward()
+            opt.step()
+        bs = y.shape[0]
+        correct += float((out.numpy().argmax(axis=1) == y.numpy()).sum())
+        total_loss += float(loss.numpy()) * bs
+        n += bs
+    return correct / n, total_loss / n
     ### END YOUR SOLUTION
 
 
@@ -134,7 +171,10 @@ def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    opt = optimizer(model.parameters(), lr=lr, weight_decay=weight_decay)
+    for _ in range(n_epochs):
+        avg_acc, avg_loss = epoch_general_cifar10(dataloader, model, loss_fn=loss_fn(), opt=opt)
+    return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
 
@@ -153,7 +193,7 @@ def evaluate_cifar10(model, dataloader, loss_fn=nn.SoftmaxLoss):
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    return epoch_general_cifar10(dataloader, model, loss_fn=loss_fn(), opt=None)
     ### END YOUR SOLUTION
 
 
@@ -180,7 +220,31 @@ def epoch_general_ptb(data, model, seq_len=40, loss_fn=nn.SoftmaxLoss(), opt=Non
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    training = opt is not None
+    model.train() if training else model.eval()
+    nbatch = data.shape[0]
+    correct, total_loss, n = 0.0, 0.0, 0
+    h = None
+    for i in range(0, nbatch - 1, seq_len):
+        X, y = ndl.data.get_batch(data, i, seq_len, device=device, dtype=dtype)
+        out, h = model(X, h)
+        # truncated BPTT: carry the hidden state forward but cut the graph
+        if isinstance(h, tuple):
+            h = tuple(x.detach() for x in h)
+        else:
+            h = h.detach()
+        loss = loss_fn(out, y)
+        if training:
+            opt.reset_grad()
+            loss.backward()
+            if clip is not None:
+                opt.clip_grad_norm(clip)
+            opt.step()
+        bs = y.shape[0]
+        correct += float((out.numpy().argmax(axis=1) == y.numpy()).sum())
+        total_loss += float(loss.numpy()) * bs
+        n += bs
+    return correct / n, total_loss / n
     ### END YOUR SOLUTION
 
 
@@ -207,7 +271,11 @@ def train_ptb(model, data, seq_len=40, n_epochs=1, optimizer=ndl.optim.SGD,
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    opt = optimizer(model.parameters(), lr=lr, weight_decay=weight_decay)
+    for _ in range(n_epochs):
+        avg_acc, avg_loss = epoch_general_ptb(data, model, seq_len=seq_len, loss_fn=loss_fn(),
+                                              opt=opt, clip=clip, device=device, dtype=dtype)
+    return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
 def evaluate_ptb(model, data, seq_len=40, loss_fn=nn.SoftmaxLoss,
@@ -227,7 +295,8 @@ def evaluate_ptb(model, data, seq_len=40, loss_fn=nn.SoftmaxLoss,
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    return epoch_general_ptb(data, model, seq_len=seq_len, loss_fn=loss_fn(), opt=None,
+                             device=device, dtype=dtype)
     ### END YOUR SOLUTION
 
 ### CODE BELOW IS FOR ILLUSTRATION, YOU DO NOT NEED TO EDIT
